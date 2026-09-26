@@ -53,6 +53,16 @@ BANK_CONFIGS = {
         "skip_markers": ["transaction total", "closing balance"],
     },
 
+    "sbi": {
+        "label": "State Bank of India",
+        "method": "table",
+        "match_keywords": ["state bank of india"],
+        "col_date": 0, "col_narration": 2, "col_debit": 4, "col_credit": 5, "col_balance": 6,
+        "date_pattern": re.compile(r"^\d{2}-\d{2}-\d{4}"),
+        "opening_balance_markers": ["brought forward"],
+        "skip_markers": ["closing balance", "statement summary"],
+    },
+
     "union_bank": {
         "label": "Union Bank of India (scanned/Finacle-style)",
         "method": "ocr_scan",
