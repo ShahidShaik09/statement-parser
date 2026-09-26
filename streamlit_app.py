@@ -1,24 +1,12 @@
 import streamlit as st
-import subprocess
 import sys
+import io
+import contextlib
 import tempfile
 from pathlib import Path
 import pandas as pd
 
 st.set_page_config(page_title="Bank Statement to Excel", page_icon="🏦", layout="centered")
-
-with st.expander("🔧 Debug info (temporary)"):
-    st.write("Python executable:", sys.executable)
-    try:
-        import pdfplumber
-        st.success(f"pdfplumber imports fine in the main app process (version {pdfplumber.__version__})")
-    except ImportError as e:
-        st.error(f"pdfplumber import FAILED in the main app process: {e}")
-    pip_check = subprocess.run(
-        [sys.executable, "-m", "pip", "show", "pdfplumber"],
-        capture_output=True, text=True,
-    )
-    st.code(pip_check.stdout or pip_check.stderr or "(pip show returned nothing)", language="text")
 
 st.title("🏦 Bank Statement PDF to Excel")
 st.write(
@@ -27,63 +15,80 @@ st.write(
     "and flags any row where the balance math doesn't reconcile."
 )
 
-PARSER_SCRIPT = "bank_statement_parser_v6.py"
+# Import the parser as a module (not via subprocess) so it always runs in
+# the exact same environment as this app -- avoids environment-mismatch
+# issues that can occur when spawning a subprocess in some hosting setups.
+try:
+    import bank_statement_parser_v6 as parser
+    PARSER_IMPORT_ERROR = None
+except Exception as e:
+    parser = None
+    PARSER_IMPORT_ERROR = e
+
+if PARSER_IMPORT_ERROR:
+    st.error(f"Could not import bank_statement_parser_v6.py: {PARSER_IMPORT_ERROR}")
+    st.stop()
 
 uploaded_file = st.file_uploader("Choose a PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / "input.pdf"
-        output_path = Path(tmpdir) / "output.xlsx"
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
 
-        with open(input_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+    log_buffer = io.StringIO()
+    transactions = None
+    run_error = None
 
-        with st.spinner("Processing... this can take a while for scanned PDFs (OCR)."):
-            result = subprocess.run(
-                [sys.executable, PARSER_SCRIPT, str(input_path), str(output_path)],
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
+    with st.spinner("Processing... this can take a while for scanned PDFs (OCR)."):
+        try:
+            with contextlib.redirect_stdout(log_buffer):
+                transactions = parser.extract(tmp_path)
+        except Exception as e:
+            run_error = e
 
-        with st.expander("Log output"):
-            st.code(result.stdout or "(no stdout)", language="text")
-            if result.stderr:
-                st.code(result.stderr, language="text")
+    with st.expander("Log output"):
+        st.code(log_buffer.getvalue() or "(no output)", language="text")
+        if run_error:
+            st.exception(run_error)
 
-        if output_path.exists():
-            sheets = pd.read_excel(output_path, sheet_name=None)
-            df = sheets.get("Transactions")
+    if run_error:
+        st.error("The parser raised an error. See the log above for details.")
+    elif not transactions:
+        st.warning("0 transactions extracted — this bank's format may not be configured yet in BANK_CONFIGS.")
+    else:
+        df = pd.DataFrame(transactions)
+        df.insert(0, "row", range(1, len(df) + 1))
+        df_out = df[["row", "date", "narration", "debit", "credit", "balance", "note"]]
+        flagged_df = df_out[df_out["note"] != ""]
 
-            if df is None or df.empty:
-                st.warning("0 transactions extracted — this bank's format may not be configured yet in BANK_CONFIGS.")
-            else:
-                st.success(f"Extracted {len(df)} transaction(s).")
-
-                flagged_df = sheets.get("Flagged for review")
-                n_flagged = 0 if flagged_df is None else len(flagged_df)
-                if n_flagged:
-                    st.warning(f"{n_flagged} row(s) flagged for manual review ({100*n_flagged/len(df):.1f}%).")
-                else:
-                    st.info("No rows flagged — all balances reconciled.")
-
-                st.subheader("All transactions")
-                st.dataframe(df, use_container_width=True)
-
-                if n_flagged:
-                    st.subheader("Flagged rows")
-                    st.dataframe(flagged_df, use_container_width=True)
-
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download Excel file",
-                    data=f.read(),
-                    file_name=f"{Path(uploaded_file.name).stem}_extracted.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+        st.success(f"Extracted {len(df_out)} transaction(s).")
+        if len(flagged_df):
+            st.warning(f"{len(flagged_df)} row(s) flagged for manual review "
+                       f"({100*len(flagged_df)/len(df_out):.1f}%).")
         else:
-            st.error("Parser did not produce an output file. Check the log above for errors.")
+            st.info("No rows flagged — all balances reconciled.")
+
+        st.subheader("All transactions")
+        st.dataframe(df_out, use_container_width=True)
+
+        if len(flagged_df):
+            st.subheader("Flagged rows")
+            st.dataframe(flagged_df, use_container_width=True)
+
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+            df_out.to_excel(writer, sheet_name="Transactions", index=False)
+            if len(flagged_df):
+                flagged_df.to_excel(writer, sheet_name="Flagged for review", index=False)
+        excel_buffer.seek(0)
+
+        st.download_button(
+            "⬇️ Download Excel file",
+            data=excel_buffer,
+            file_name=f"{Path(uploaded_file.name).stem}_extracted.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 st.divider()
 st.caption(
