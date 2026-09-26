@@ -1,10 +1,24 @@
 import streamlit as st
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import pandas as pd
 
 st.set_page_config(page_title="Bank Statement to Excel", page_icon="🏦", layout="centered")
+
+with st.expander("🔧 Debug info (temporary)"):
+    st.write("Python executable:", sys.executable)
+    try:
+        import pdfplumber
+        st.success(f"pdfplumber imports fine in the main app process (version {pdfplumber.__version__})")
+    except ImportError as e:
+        st.error(f"pdfplumber import FAILED in the main app process: {e}")
+    pip_check = subprocess.run(
+        [sys.executable, "-m", "pip", "show", "pdfplumber"],
+        capture_output=True, text=True,
+    )
+    st.code(pip_check.stdout or pip_check.stderr or "(pip show returned nothing)", language="text")
 
 st.title("🏦 Bank Statement PDF to Excel")
 st.write(
@@ -27,7 +41,7 @@ if uploaded_file is not None:
 
         with st.spinner("Processing... this can take a while for scanned PDFs (OCR)."):
             result = subprocess.run(
-                ["python3", PARSER_SCRIPT, str(input_path), str(output_path)],
+                [sys.executable, PARSER_SCRIPT, str(input_path), str(output_path)],
                 capture_output=True,
                 text=True,
                 timeout=600,
